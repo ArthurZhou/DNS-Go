@@ -16,3 +16,6 @@
 
 
 .idea/
+/config.json
+/records.json
+/config.ini

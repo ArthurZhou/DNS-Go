@@ -3,22 +3,19 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"fmt"
+	"github.com/miekg/dns"
+	"gopkg.in/ini.v1"
 	"log"
 	"net"
 	"os"
-	"strconv"
 	"strings"
-
-	"github.com/miekg/dns"
 )
 
-var records = map[string]string{
-	"test.service.": "192.168.0.2",
-	"abc.com.":      "192.168.0.1",
-}
+var records = map[string]string{}
 
-const VER = "0.0.1"
+const VER = "0.0.2"
 
 func parseQuery(m *dns.Msg) {
 	for _, q := range m.Question {
@@ -31,7 +28,7 @@ func parseQuery(m *dns.Msg) {
 				if err == nil {
 					m.Answer = append(m.Answer, rr)
 				}
-			} else {
+			} else if os.Getenv("DNSGO_globr") == "true" {
 				ips, err := net.LookupIP(q.Name)
 				if err == nil {
 					for _, ip := range ips {
@@ -71,7 +68,35 @@ func cmd() {
 		switch splitCmd[0] {                     // execute commands
 		case "add":
 			records[splitCmd[1]] = splitCmd[2]
+			recStr, err := json.Marshal(records)
+			if err != nil {
+				log.Println("Failed to write record pool to file")
+			}
+			recFile, err := os.OpenFile("records.json", os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
+			if err != nil {
+				log.Println("Failed to write record pool to file")
+			}
+			_, _ = recFile.Write(recStr)
+			_ = recFile.Close()
 			log.Printf("Successfully add a record: %s -> %s\n", splitCmd[1], splitCmd[2])
+		case "del":
+			ip := records[splitCmd[1]]
+			if ip != "" {
+				delete(records, splitCmd[1])
+				recStr, err := json.Marshal(records)
+				if err != nil {
+					log.Println("Failed to write record pool to file")
+				}
+				recFile, err := os.OpenFile("records.json", os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
+				if err != nil {
+					log.Println("Failed to write record pool to file")
+				}
+				_, _ = recFile.Write(recStr)
+				_ = recFile.Close()
+				log.Printf("Successfully delete a record: %s -> %s\n", splitCmd[1], ip)
+			} else {
+				log.Println("Record does not exist")
+			}
 		case "list":
 			listStr := new(bytes.Buffer)
 			for key, value := range records {
@@ -87,17 +112,63 @@ func cmd() {
 	}
 }
 
+func readConfig() {
+	log.Println("Loading config...")
+	if _, errRead := os.Stat("config.ini"); os.IsNotExist(errRead) {
+		// config fie does not exist
+		log.Println("Config file does not exists. Now creating one...")
+		newFile, errCreate := os.Create("config.ini") // create a new one
+		if errCreate != nil {
+			log.Panicf("Failed to create config.ini: %v \n", errCreate)
+		}
+		_, _ = newFile.WriteString("[Network]\naddress=127.0.0.1:53\nhandler_pattern=.\n\n[Lookup]\nallow_global_record=false\n")
+		_ = newFile.Close()
+	}
+	cfg, errLoad := ini.Load("config.ini") // read config file
+	if errLoad != nil {
+		log.Panicf("Failed to read config.ini: %v \n", errLoad)
+	}
+	_ = os.Setenv("DNSGO_addr", cfg.Section("Network").Key("address").String())
+	_ = os.Setenv("DNSGO_hpatt", cfg.Section("Network").Key("handler_pattern").String())
+	_ = os.Setenv("DNSGO_globr", cfg.Section("Lookup").Key("allow_global_record").String())
+}
+
+func loadRecords() {
+	log.Println("Loading records...")
+	if _, errRead := os.Stat("records.json"); os.IsNotExist(errRead) {
+		// config fie does not exist
+		log.Println("Records file does not exists. Now creating one...")
+		newFile, errCreate := os.Create("records.json") // create a new one
+		if errCreate != nil {
+			log.Panicf("Failed to create records.json: %v \n", errCreate)
+		}
+		_, _ = newFile.WriteString("{}")
+		_ = newFile.Close()
+	}
+	recIo, errLoad := os.ReadFile("records.json")
+	if errLoad != nil {
+		if errLoad != nil {
+			log.Panicf("Failed to read records.json: %v \n", errLoad)
+		}
+	}
+	err := json.Unmarshal(recIo, &records)
+	if err != nil {
+		log.Panicf("Failed to load records: %v \n", err)
+	}
+}
+
 func main() {
 	log.Printf("Starting DNS-Go  ver: %s", VER)
+	readConfig()
+	loadRecords()
+
 	// attach request handler func
-	dns.HandleFunc(".", handleDnsRequest)
+	dns.HandleFunc(os.Getenv("DNSGO_hpatt"), handleDnsRequest)
 
 	// start server
 	go cmd()
-	host := ""
-	port := 53
-	server := &dns.Server{Addr: host + ":" + strconv.Itoa(port), Net: "udp"}
-	log.Printf("Binding at %s\n", host+":"+strconv.Itoa(port))
+	server := &dns.Server{Addr: os.Getenv("DNSGO_addr"), Net: "udp"}
+	log.Printf("Binding at %s\n", os.Getenv("DNSGO_addr"))
 	err := server.ListenAndServe()
 	defer func(server *dns.Server) {
 		err := server.Shutdown()
